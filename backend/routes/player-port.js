@@ -128,7 +128,8 @@ router.get('/iframe', async (req, res) => {
       // Stream padrão do usuário baseado no login
       try {
         console.log(`🔍 Verificando transmissão ativa para usuário ${login}...`);
-        // Verificar se há transmissão ativa para este usuário
+        
+        // 1. Verificar transmissão de playlist primeiro
         const [userTransmission] = await db.execute(
           'SELECT t.*, p.nome as playlist_nome FROM transmissoes t LEFT JOIN playlists p ON t.codigo_playlist = p.id LEFT JOIN streamings s ON t.codigo_stm = s.codigo_cliente WHERE (s.usuario = ? OR s.email LIKE ?) AND t.status = "ativa" LIMIT 1',
           [login, `${login}@%`]
@@ -138,16 +139,31 @@ router.get('/iframe', async (req, res) => {
           const transmission = userTransmission[0];
           console.log(`✅ Transmissão de usuário encontrada:`, transmission);
           const wowzaHost = 'stmv1.udicast.com';
-          videoUrl = `http://${wowzaHost}:80/${login}/${login}/playlist.m3u8`;
+          videoUrl = `http://${wowzaHost}:1935/samhost/smil:playlists_agendamentos.smil/playlist.m3u8`;
           title = `Playlist: ${transmission.playlist_nome}`;
           isLive = true;
         } else {
-          console.log(`⚠️ Nenhuma transmissão ativa para usuário ${login}, verificando OBS...`);
-          // Fallback para OBS
-          const wowzaHost = 'stmv1.udicast.com';
-          videoUrl = `http://${wowzaHost}:80/${login}/${login}_live/playlist.m3u8`;
-          title = `Stream: ${login}`;
-          isLive = true;
+          console.log(`⚠️ Nenhuma transmissão de playlist para usuário ${login}, verificando OBS...`);
+          
+          // 2. Verificar transmissão OBS
+          const [obsTransmission] = await db.execute(
+            'SELECT l.* FROM lives l LEFT JOIN streamings s ON l.codigo_stm = s.codigo_cliente WHERE (s.usuario = ? OR s.email LIKE ?) AND l.status = "1" LIMIT 1',
+            [login, `${login}@%`]
+          );
+          
+          if (obsTransmission.length > 0) {
+            console.log(`✅ Transmissão OBS encontrada:`, obsTransmission[0]);
+            const wowzaHost = 'stmv1.udicast.com';
+            videoUrl = `http://${wowzaHost}:1935/samhost/${login}_live/playlist.m3u8`;
+            title = `Stream OBS: ${login}`;
+            isLive = true;
+          } else {
+            console.log(`⚠️ Nenhuma transmissão ativa para usuário ${login}`);
+            // Sem transmissão ativa - mostrar "sem sinal"
+            videoUrl = '';
+            title = `Sem Transmissão - ${login}`;
+            isLive = false;
+          }
         }
       } catch (error) {
         console.error('Erro ao verificar transmissão do usuário:', error);
@@ -259,7 +275,9 @@ router.get('/iframe', async (req, res) => {
       videoUrl,
       title,
       isLive,
-      userLogin
+      userLogin,
+      hasPlaylistTransmission: playlistTransmissionRows?.length > 0,
+      hasOBSTransmission: obsRows?.length > 0
     });
 
     // Gerar HTML do player

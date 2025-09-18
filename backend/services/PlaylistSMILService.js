@@ -94,7 +94,7 @@ class PlaylistSMILService {
                 smil_path: smilPath,
                 playlists_count: playlistRows.length,
                 agendamentos_count: agendamentoRows.length,
-                total_videos: smilContent.split('<video').length - 1
+                total_videos: (typeof smilContent === 'string' ? smilContent.split('<video').length - 1 : 0)
             };
 
         } catch (error) {

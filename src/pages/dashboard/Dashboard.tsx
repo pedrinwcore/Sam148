@@ -3,7 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useStream } from '../../context/StreamContext';
 import { 
   Activity, Users, Zap, Clock, Play, Square, Radio, Video, Pause,
-  TrendingUp, Globe, Monitor, Smartphone, Eye, Settings,
+  TrendingUp, Globe, Monitor, Smartphone, Eye, Settings, List, Wifi,
   AlertCircle, CheckCircle, Wifi, WifiOff, Server, HardDrive
 } from 'lucide-react';
 import { toast } from 'react-toastify';
@@ -111,17 +111,35 @@ const Dashboard: React.FC = () => {
     
     try {
       const token = await getToken();
-      const response = await fetch('/api/streaming/stop', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          transmission_id: streamStatus?.transmission?.id,
-          stream_type: streamStatus?.stream_type || 'playlist'
-        })
-      });
+      
+      let response;
+      
+      if (streamStatus?.stream_type === 'obs' && streamStatus.transmission?.id) {
+        // Finalizar transmissão OBS
+        response = await fetch(`/api/streaming/stop-live/${streamStatus.transmission.id}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          }
+        });
+      } else if (streamStatus?.stream_type === 'playlist') {
+        // Finalizar transmissão de playlist
+        response = await fetch('/api/streaming/stop', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            transmission_id: streamStatus?.transmission?.id,
+            stream_type: 'playlist'
+          })
+        });
+      } else {
+        toast.error('Tipo de transmissão não identificado');
+        return;
+      }
       
       const result = await response.json();
       if (result.success) {
@@ -197,46 +215,77 @@ const Dashboard: React.FC = () => {
   const loadStreamStatus = async () => {
     try {
       const token = await getToken();
-      const response = await fetch('/api/streaming/status', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
       
-      if (response.ok) {
-        const data = await response.json();
+      // Verificar ambos os tipos de transmissão
+      const [streamResponse, obsResponse] = await Promise.all([
+        fetch('/api/streaming/status', {
+          headers: { Authorization: `Bearer ${token}` }
+        }),
+        fetch('/api/streaming/obs-status', {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+      ]);
+      
+      if (streamResponse.ok && obsResponse.ok) {
+        const streamData = await streamResponse.json();
+        const obsData = await obsResponse.json();
+        
+        // Priorizar playlist se estiver ativa, senão OBS
+        let finalData = streamData;
+        
+        if (!streamData.is_live && obsData.success && obsData.obs_stream?.is_live) {
+          finalData = {
+            success: true,
+            is_live: true,
+            stream_type: 'obs',
+            transmission: {
+              id: obsData.obs_stream.live_id,
+              titulo: `Transmissão OBS - ${userLogin}`,
+              stats: {
+                viewers: obsData.obs_stream.viewers,
+                bitrate: obsData.obs_stream.bitrate,
+                uptime: obsData.obs_stream.uptime,
+                isActive: true
+              }
+            },
+            urls: obsData.obs_stream.urls
+          };
+        }
+        
         setStreamStatus(data);
         
         // Definir URL do player e nome baseado no status
-        if (data.is_live) {
-          if (data.stream_type === 'obs' || data.obs_stream?.is_live) {
+        if (finalData.is_live) {
+          if (finalData.stream_type === 'obs') {
             // Para OBS, usar URL do player na porta do sistema
             const baseUrl = process.env.NODE_ENV === 'production' 
               ? 'http://samhost.wcore.com.br:3001'
               : 'http://localhost:3001';
             setCurrentVideoUrl(`${baseUrl}/api/player-port/iframe?login=${userLogin}&stream=${userLogin}_live&player=1&contador=true`);
-            setPlaylistName('Transmissão OBS');
-          } else if (data.transmission) {
+            setPlaylistName('📡 Transmissão OBS ao Vivo');
+          } else if (finalData.stream_type === 'playlist' && finalData.transmission) {
             // Para playlist, usar URL do player na porta do sistema
             const baseUrl = process.env.NODE_ENV === 'production' 
               ? 'http://samhost.wcore.com.br:3001'
               : 'http://localhost:3001';
-            setCurrentVideoUrl(`${baseUrl}/api/player-port/iframe?login=${userLogin}&playlist=${data.transmission.codigo_playlist}&player=1&contador=true&compartilhamento=true`);
+            setCurrentVideoUrl(`${baseUrl}/api/player-port/iframe?login=${userLogin}&playlist=${finalData.transmission.codigo_playlist}&player=1&contador=true&compartilhamento=true`);
             
             // Buscar nome da playlist
-            if (data.transmission.codigo_playlist) {
+            if (finalData.transmission.codigo_playlist) {
               try {
                 const playlistResponse = await fetch(`/api/playlists`, {
                   headers: { Authorization: `Bearer ${token}` }
                 });
                 if (playlistResponse.ok) {
                   const playlists = await playlistResponse.json();
-                  const playlist = playlists.find((p: any) => p.id === data.transmission.codigo_playlist);
-                  setPlaylistName(playlist ? `📺 Playlist: ${playlist.nome}` : data.transmission.titulo);
+                  const playlist = playlists.find((p: any) => p.id === finalData.transmission.codigo_playlist);
+                  setPlaylistName(playlist ? `📺 Playlist: ${playlist.nome}` : finalData.transmission.titulo);
                 }
               } catch (error) {
-                setPlaylistName(data.transmission.titulo);
+                setPlaylistName(finalData.transmission.titulo);
               }
             } else {
-              setPlaylistName(data.transmission.titulo);
+              setPlaylistName(finalData.transmission.titulo);
             }
           }
           setShowPlayer(true);
@@ -245,7 +294,7 @@ const Dashboard: React.FC = () => {
           setPlaylistName('');
           setPlayerError(null);
         }
-      }
+        setStreamStatus(finalData);
     } catch (error) {
       console.error('Erro ao verificar status de transmissão:', error);
       setPlayerError('Erro ao carregar status de transmissão');
@@ -419,6 +468,26 @@ const Dashboard: React.FC = () => {
               <>
                 <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse mr-2"></div>
                 <span>Ao vivo agora</span>
+                
+                {streamStatus?.stream_type === 'playlist' && (
+                  <button
+                    onClick={() => window.location.href = '/dashboard/playlists'}
+                    className="w-full bg-gradient-to-r from-purple-500 to-violet-600 text-white p-3 rounded-xl font-medium hover:from-purple-600 hover:to-violet-700 transition-all duration-200 flex items-center justify-center"
+                  >
+                    <List className="h-5 w-5 mr-2" />
+                    Gerenciar Playlist
+                  </button>
+                )}
+                
+                {streamStatus?.stream_type === 'obs' && (
+                  <button
+                    onClick={() => window.location.href = '/dashboard/dados-conexao'}
+                    className="w-full bg-gradient-to-r from-green-500 to-emerald-600 text-white p-3 rounded-xl font-medium hover:from-green-600 hover:to-emerald-700 transition-all duration-200 flex items-center justify-center"
+                  >
+                    <Wifi className="h-5 w-5 mr-2" />
+                    Dados OBS
+                  </button>
+                )}
               </>
             ) : (
               <>
@@ -457,7 +526,7 @@ const Dashboard: React.FC = () => {
       {/* Live Stream Status */}
       {streamStatus?.is_live && (
         <div className={`rounded-2xl p-6 text-white ${
-          streamStatus.stream_type === 'playlist' 
+          streamStatus.stream_type === 'playlist'
             ? 'bg-gradient-to-r from-blue-500 to-purple-600' 
             : 'bg-gradient-to-r from-red-500 to-pink-600'
         }`}>
@@ -474,27 +543,33 @@ const Dashboard: React.FC = () => {
               <div className="flex items-center space-x-1">
                 <Users className="h-4 w-4" />
                 <span>
-                  {streamStatus.transmission?.stats.viewers || streamStatus.obs_stream?.viewers || 0} espectadores
+                  {streamStatus.transmission?.stats.viewers || 0} espectadores
                 </span>
               </div>
               <div className="flex items-center space-x-1">
                 <Zap className="h-4 w-4" />
                 <span>
-                  {streamStatus.transmission?.stats.bitrate || streamStatus.obs_stream?.bitrate || 0} kbps
+                  {streamStatus.transmission?.stats.bitrate || 0} kbps
                 </span>
               </div>
               <div className="flex items-center space-x-1">
                 <Clock className="h-4 w-4" />
                 <span>
-                  {streamStatus.transmission?.stats.uptime || streamStatus.obs_stream?.uptime || '00:00:00'}
+                  {streamStatus.transmission?.stats.uptime || '00:00:00'}
                 </span>
               </div>
             </div>
           </div>
           
-          {streamStatus.transmission && playlistName && streamStatus.stream_type === 'playlist' && (
+          {streamStatus.stream_type === 'playlist' && playlistName && (
             <p className="text-purple-100">
               <strong>Playlist:</strong> {playlistName}
+            </p>
+          )}
+          
+          {streamStatus.stream_type === 'obs' && (
+            <p className="text-red-100">
+              <strong>Transmissão OBS:</strong> Stream ao vivo via OBS Studio
             </p>
           )}
           
@@ -503,6 +578,15 @@ const Dashboard: React.FC = () => {
               <p className="text-sm">
                 <strong>📺 Transmissão de Playlist:</strong> A playlist está sendo transmitida automaticamente.
                 Os vídeos são reproduzidos em sequência conforme configurado.
+              </p>
+            </div>
+          )}
+          
+          {streamStatus.stream_type === 'obs' && (
+            <div className="mt-3 p-3 bg-white bg-opacity-20 rounded-lg">
+              <p className="text-sm">
+                <strong>📡 Transmissão OBS:</strong> Stream ao vivo sendo transmitido via OBS Studio.
+                Configure seu OBS para transmitir para: rtmp://stmv1.udicast.com:1935/samhost/{userLogin}_live
               </p>
             </div>
           )}
@@ -549,11 +633,11 @@ const Dashboard: React.FC = () => {
                     setPlayerError(null);
                   }}
                   streamStats={streamStatus?.is_live ? {
-                    viewers: streamStatus.transmission?.stats.viewers || streamStatus.obs_stream?.viewers || 0,
-                    bitrate: streamStatus.transmission?.stats.bitrate || streamStatus.obs_stream?.bitrate || 0,
-                    uptime: streamStatus.transmission?.stats.uptime || streamStatus.obs_stream?.uptime || '00:00:00',
+                    viewers: streamStatus.transmission?.stats.viewers || 0,
+                    bitrate: streamStatus.transmission?.stats.bitrate || 0,
+                    uptime: streamStatus.transmission?.stats.uptime || '00:00:00',
                     quality: '1080p',
-                    isRecording: streamStatus.obs_stream?.recording || false
+                    isRecording: streamStatus.stream_type === 'obs'
                   } : undefined}
                 />
               ) : (
@@ -569,7 +653,7 @@ const Dashboard: React.FC = () => {
                     {playerError ? playerError :
                      streamStatus?.is_live 
                       ? 'Aguarde o carregamento da transmissão'
-                      : 'Inicie uma playlist ou transmissão OBS para visualizar aqui'
+                      : 'Inicie uma playlist (via Playlists) ou transmissão OBS (via Iniciar Transmissão) para visualizar aqui'
                     }
                   </p>
                   {playerError && (
@@ -713,8 +797,11 @@ const Dashboard: React.FC = () => {
                       </div>
                       <button
                         onClick={() => {
-                          // Usar IFrame player
-                          setCurrentVideoUrl(video.url);
+                          // Construir URL do player para vídeo específico
+                          const baseUrl = process.env.NODE_ENV === 'production' 
+                            ? 'http://samhost.wcore.com.br:3001'
+                            : 'http://localhost:3001';
+                          setCurrentVideoUrl(`${baseUrl}/api/player-port/iframe?video=${video.id}&player=1`);
                           setShowPlayer(true);
                         }}
                         className="text-blue-600 hover:text-blue-800"

@@ -459,8 +459,49 @@ router.delete('/remove-live/:id', authMiddleware, async (req, res) => {
 router.get('/status', authMiddleware, async (req, res) => {
   try {
     const userId = req.user.id;
+    const userLogin = req.user.usuario || (req.user.email ? req.user.email.split('@')[0] : `user_${userId}`);
 
-    // Verificar transmissões ativas
+    // 1. Verificar transmissões de playlist ativas
+    const [playlistTransmissionRows] = await db.execute(
+      'SELECT * FROM transmissoes WHERE codigo_stm = ? AND status = "ativa" ORDER BY data_inicio DESC LIMIT 1',
+      [userId]
+    );
+
+    if (playlistTransmissionRows.length > 0) {
+      const transmission = playlistTransmissionRows[0];
+      const now = new Date();
+      const dataInicio = new Date(transmission.data_inicio);
+      const diffMs = now.getTime() - dataInicio.getTime();
+      const uptime = formatDuration(Math.floor(diffMs / 1000));
+
+      return res.json({
+        success: true,
+        is_live: true,
+        stream_type: 'playlist',
+        transmission: {
+          id: transmission.codigo,
+          titulo: transmission.titulo,
+          codigo_playlist: transmission.codigo_playlist,
+          data_inicio: transmission.data_inicio,
+          data_fim: transmission.data_fim,
+          stats: {
+            viewers: Math.floor(Math.random() * 50) + 10,
+            bitrate: 2500,
+            uptime: uptime,
+            isActive: true
+          }
+        },
+        urls: {
+          hls: `http://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil/playlist.m3u8`,
+          hls_http: `http://stmv1.udicast.com/samhost/smil:playlists_agendamentos.smil/playlist.m3u8`,
+          rtmp: `rtmp://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil`,
+          rtsp: `rtsp://stmv1.udicast.com:554/samhost/smil:playlists_agendamentos.smil`,
+          dash: `http://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil/manifest.mpd`
+        }
+      });
+    }
+
+    // 2. Verificar transmissões OBS ativas (lives)
     const [activeRows] = await db.execute(
       'SELECT * FROM lives WHERE codigo_stm = ? AND status = "1" ORDER BY data_inicio DESC LIMIT 1',
       [userId]
@@ -476,7 +517,7 @@ router.get('/status', authMiddleware, async (req, res) => {
       res.json({
         success: true,
         is_live: true,
-        stream_type: 'live',
+        stream_type: 'obs',
         transmission: {
           id: activeLive.codigo,
           tipo: activeLive.tipo,
@@ -490,9 +531,17 @@ router.get('/status', authMiddleware, async (req, res) => {
             uptime: uptime,
             isActive: true
           }
+        },
+        urls: {
+          hls: `http://stmv1.udicast.com:1935/samhost/${userLogin}_live/playlist.m3u8`,
+          hls_http: `http://stmv1.udicast.com/samhost/${userLogin}_live/playlist.m3u8`,
+          rtmp: `rtmp://stmv1.udicast.com:1935/samhost/${userLogin}_live`,
+          rtsp: `rtsp://stmv1.udicast.com:554/samhost/${userLogin}_live`,
+          dash: `http://stmv1.udicast.com:1935/samhost/${userLogin}_live/manifest.mpd`
         }
       });
     } else {
+      // 3. Nenhuma transmissão ativa
       res.json({
         success: true,
         is_live: false,
@@ -503,6 +552,63 @@ router.get('/status', authMiddleware, async (req, res) => {
 
   } catch (error) {
     console.error('Erro ao verificar status:', error);
+    res.status(500).json({ success: false, error: 'Erro interno do servidor' });
+  }
+});
+
+// GET /api/streaming/obs-status - Status específico do OBS
+router.get('/obs-status', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userLogin = req.user.usuario || (req.user.email ? req.user.email.split('@')[0] : `user_${userId}`);
+
+    // Verificar se há stream OBS ativo
+    const [obsRows] = await db.execute(
+      'SELECT * FROM lives WHERE codigo_stm = ? AND status = "1" ORDER BY data_inicio DESC LIMIT 1',
+      [userId]
+    );
+
+    if (obsRows.length > 0) {
+      const obsLive = obsRows[0];
+      const now = new Date();
+      const dataInicio = new Date(obsLive.data_inicio);
+      const diffMs = now.getTime() - dataInicio.getTime();
+      const uptime = formatDuration(Math.floor(diffMs / 1000));
+
+      res.json({
+        success: true,
+        obs_stream: {
+          is_live: true,
+          live_id: obsLive.codigo,
+          platform: obsLive.tipo,
+          viewers: Math.floor(Math.random() * 50) + 10,
+          bitrate: 2500,
+          uptime: uptime,
+          recording: false,
+          urls: {
+            hls: `http://stmv1.udicast.com:1935/samhost/${userLogin}_live/playlist.m3u8`,
+            hls_http: `http://stmv1.udicast.com/samhost/${userLogin}_live/playlist.m3u8`,
+            rtmp: `rtmp://stmv1.udicast.com:1935/samhost/${userLogin}_live`,
+            rtsp: `rtsp://stmv1.udicast.com:554/samhost/${userLogin}_live`,
+            dash: `http://stmv1.udicast.com:1935/samhost/${userLogin}_live/manifest.mpd`
+          }
+        }
+      });
+    } else {
+      res.json({
+        success: true,
+        obs_stream: {
+          is_live: false,
+          viewers: 0,
+          bitrate: 0,
+          uptime: '00:00:00',
+          recording: false
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error('Erro ao verificar status OBS:', error);
     res.status(500).json({ success: false, error: 'Erro interno do servidor' });
   }
 });
@@ -531,6 +637,137 @@ router.get('/source-urls', authMiddleware, async (req, res) => {
 
   } catch (error) {
     console.error('Erro ao obter URLs de fonte:', error);
+    res.status(500).json({ success: false, error: 'Erro interno do servidor' });
+  }
+});
+// POST /api/streaming/stop - Parar transmissão de playlist
+router.post('/stop', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { transmission_id, stream_type } = req.body;
+
+    if (stream_type === 'playlist') {
+      // Parar transmissão de playlist
+      const [result] = await db.execute(
+        'UPDATE transmissoes SET status = "finalizada", data_fim = NOW() WHERE codigo = ? AND codigo_stm = ?',
+        [transmission_id, userId]
+      );
+
+      if (result.affectedRows > 0) {
+        res.json({
+          success: true,
+          message: 'Transmissão de playlist finalizada com sucesso'
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          error: 'Transmissão não encontrada'
+        });
+      }
+    } else {
+// POST /api/streaming/start - Iniciar transmissão de playlist
+router.post('/start', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userLogin = req.user.usuario || (req.user.email ? req.user.email.split('@')[0] : `user_${userId}`);
+    const { titulo, descricao, playlist_id, platform_ids = [], enable_recording = false, use_smil = true, loop_playlist = true } = req.body;
+      res.status(400).json({
+    if (!titulo || !playlist_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Título e playlist são obrigatórios'
+      });
+    }
+        success: false,
+    // Verificar se playlist existe
+    const [playlistRows] = await db.execute(
+      'SELECT id, nome FROM playlists WHERE id = ? AND codigo_stm = ?',
+      [playlist_id, userId]
+    );
+        error: 'Tipo de transmissão não suportado para esta rota'
+    if (playlistRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Playlist não encontrada'
+      });
+    }
+      });
+    const playlist = playlistRows[0];
+    }
+    // Verificar se já há transmissão ativa
+    const [activeTransmissionRows] = await db.execute(
+      'SELECT codigo FROM transmissoes WHERE codigo_stm = ? AND status = "ativa"',
+      [userId]
+    );
+
+    if (activeTransmissionRows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Já existe uma transmissão ativa. Finalize a transmissão atual antes de iniciar uma nova.'
+      });
+    }
+  } catch (error) {
+    // Inserir nova transmissão
+    const [result] = await db.execute(
+      `INSERT INTO transmissoes (
+        codigo_stm, codigo_playlist, titulo, descricao, status, data_inicio, 
+        enable_recording, use_smil, loop_playlist
+      ) VALUES (?, ?, ?, ?, 'ativa', NOW(), ?, ?, ?)`,
+      [userId, playlist_id, titulo, descricao || '', enable_recording ? 1 : 0, use_smil ? 1 : 0, loop_playlist ? 1 : 0]
+    );
+    console.error('Erro ao parar transmissão:', error);
+    const transmissionId = result.insertId;
+    res.status(500).json({ success: false, error: 'Erro interno do servidor' });
+    // Atualizar arquivo SMIL do usuário
+    try {
+      const [serverRows] = await db.execute(
+        'SELECT servidor_id FROM folders WHERE user_id = ? LIMIT 1',
+        [userId]
+      );
+      const serverId = serverRows.length > 0 ? serverRows[0].servidor_id : 1;
+      
+      const PlaylistSMILService = require('../services/PlaylistSMILService');
+      await PlaylistSMILService.updateUserSMIL(userId, userLogin, serverId);
+      console.log(`✅ Arquivo SMIL atualizado para transmissão de playlist ${playlist.nome}`);
+    } catch (smilError) {
+      console.warn('Erro ao atualizar arquivo SMIL:', smilError.message);
+    }
+  }
+    // Construir URLs do player
+    const baseUrl = process.env.NODE_ENV === 'production' 
+      ? 'http://samhost.wcore.com.br:3001'
+      : 'http://localhost:3001';
+    
+    const playerUrls = {
+      iframe: `${baseUrl}/api/player-port/iframe?login=${userLogin}&playlist=${playlist_id}&player=1&contador=true&compartilhamento=true`,
+      hls: `http://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil/playlist.m3u8`,
+      hls_http: `http://stmv1.udicast.com/samhost/smil:playlists_agendamentos.smil/playlist.m3u8`,
+      rtmp: `rtmp://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil`,
+      rtsp: `rtsp://stmv1.udicast.com:554/samhost/smil:playlists_agendamentos.smil`,
+      dash: `http://stmv1.udicast.com:1935/samhost/smil:playlists_agendamentos.smil/manifest.mpd`
+    };
+});
+    res.json({
+      success: true,
+      message: `Transmissão da playlist "${playlist.nome}" iniciada com sucesso`,
+      transmission: {
+        id: transmissionId,
+        titulo: titulo,
+        playlist_id: playlist_id,
+        playlist_nome: playlist.nome,
+        status: 'ativa',
+        data_inicio: new Date().toISOString()
+      },
+      player_urls: playerUrls,
+      wowza_data: {
+        rtmpUrl: `rtmp://stmv1.udicast.com:1935/samhost`,
+        streamName: `smil:playlists_agendamentos.smil`,
+        bitrate: 2500
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao iniciar transmissão de playlist:', error);
     res.status(500).json({ success: false, error: 'Erro interno do servidor' });
   }
 });
